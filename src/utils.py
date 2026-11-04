@@ -1,10 +1,10 @@
 """
-Common LLM initialization and resilient JSON extraction utilities for RepoCompass.
+Common LLM initialization, API key management, and resilient JSON extraction utilities for RepoCompass.
 """
 import json
 import os
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from langchain_openai import ChatOpenAI
 
 try:
@@ -13,42 +13,48 @@ try:
 except ImportError:
     pass
 
-# Default gateway credentials fallback if not provided via environment variables
-_DEFAULT_API_KEY = (
-    "eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJhZXNKN2kxNGNidnVuTU40MTJrOU5yZ2ROeENhTlJudTNPbC1TU08ycFlJIn0."
-    "eyJleHAiOjE3NzA0NDI4MTIsImlhdCI6MTc3MDQ0MTAxMiwiYXV0aF90aW1lIjoxNzcwNDQxMDExLCJqdGkiOiJmZjUxMTdhNC04NGE2LTRjMjkt"
-    "Yjk0OC0wMTg3NzY2MWZkODciLCJpc3MiOiJodHRwczovL2F1dGgubWNraW5zZXkuaWQvYXV0aC9yZWFsbXMvciIsImF1ZCI6ImJjZDIzNzI4LTNk"
-    "MjctNDQ3Yy1hMGE5LWVhY2FmMzkzYTZmNSIsInN1YiI6IjZhZjEyNDMxLWUzYWMtNGM3Mi1hYjZhLTY5ZjI4ODlmYzZmYSIsInR5cCI6IklEIiwi"
-    "YXpwIjoiYmNkMjM3MjgtM2QyNy00NDdjLWEwYTktZWFjYWYzOTNhNmY1Iiwic2Vzc2lvbl9zdGF0ZSI6ImRiNzUwODQ5LWJlMmUtNDk4NC04NmZk"
-    "LWMyOGY3MThjZWFhZiIsImF0X2hhc2giOiIzMlVsT3dMMm8wUlNvUmVtX3gzUDlRIiwibmFtZSI6IlJpY2hhcmQgQ291cGVydGh3YWl0ZSIsImdp"
-    "dmVuX25hbWUiOiJSaWNoYXJkIiwiZmFtaWx5X25hbWUiOiJDb3VwZXJ0aHdhaXRlIiwicHJlZmVycmVkX3VzZXJuYW1lIjoiYjJiZWVkNDk3Yjdk"
-    "YzRmZiIsImVtYWlsIjoiUmljaGFyZF9Db3VwZXJ0aHdhaXRlQG1ja2luc2V5LmNvbSIsImFjciI6IjEiLCJzaWQiOiJkYjc1MDg0OS1iZTJlLTQ5"
-    "ODQtODZmZC1jMjhmNzE4Y2VhYWYiLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZm1ubyI6IjMxNjczNyIsImdyb3VwcyI6WyIyOTA3ZmExYy02ODNm"
-    "LTRjZjctODU1NS04YzM0YTE2Yzg4ZDgiLCJBbGwgRmlybSBVc2VycyIsIjAzYjE1YTM0LTY1NWUtNGVjNC04MzRhLWI5ZGRhMTk3MjBmMCJdfQ."
-    "ZSSU7ZL8l5o3KFoU0fhBtwapRddVm5Nz9o1mnIBj_3XYifi77shBUsRVm2cVEL3uxLTwYpybBSet2Q64O4NZJYOlfjjlukZHUeiot79mL3iTDyprz"
-    "ns34ldBnWtIbUZD4S-VF7FCPbgsRmQIlPlm8BCR9UQhjgQ3Lt_fCOuyfQli5-RZU6ypESIzFsZ-X3ROKFzzmym1fif0paxcyfZiZx8gFrI_Py0fx"
-    "a1pznuiSNGzJRcnSmuKQIARn0AfJGvm9VB07e5btuslRx4w1sexSy9vbJayPezt0EL3_-RDDsAUZ7u3Q3PjgVlcRfv0INgPpQjBncmSFvjsB-IPxkep8g"
-)
-_DEFAULT_BASE_URL = "https://openai.prod.ai-gateway.quantumblack.com/2907fa1c-683f-4cf7-8555-8c34a16c88d8/v1"
+
+def has_active_api_key() -> bool:
+    """Return True if a user-supplied OpenAI API key is configured and non-empty."""
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not key:
+        return False
+    # Ignore the expired legacy placeholder JWT from the original template
+    if key.startswith("eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJhZXNKN2kxNGNidnVuTU40MTJr"):
+        return False
+    return True
 
 
-def configure_llm_env() -> None:
-    """Ensure OpenAI environment variables are populated."""
-    if not os.environ.get("OPENAI_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = _DEFAULT_API_KEY
-    if not os.environ.get("OPENAI_BASE_URL"):
-        os.environ["OPENAI_BASE_URL"] = _DEFAULT_BASE_URL
+def set_runtime_api_config(api_key: str, base_url: Optional[str] = None) -> None:
+    """Configure runtime OpenAI API credentials from UI or environment."""
+    cleaned_key = api_key.strip()
+    if cleaned_key:
+        os.environ["OPENAI_API_KEY"] = cleaned_key
+    if base_url and base_url.strip():
+        os.environ["OPENAI_BASE_URL"] = base_url.strip()
+    elif "quantumblack.com" in os.environ.get("OPENAI_BASE_URL", ""):
+        os.environ.pop("OPENAI_BASE_URL", None)
 
 
 def create_chat_model(temperature: float = 0.1, model_name: str = "gpt-4o-mini") -> ChatOpenAI:
     """Create a configured ChatOpenAI instance."""
-    configure_llm_env()
-    return ChatOpenAI(model=model_name, temperature=temperature)
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip() or "sk-placeholder-offline-mode"
+    base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or None
+    if base_url and "quantumblack.com" in base_url and not has_active_api_key():
+        base_url = None
+    return ChatOpenAI(model=model_name, temperature=temperature, api_key=api_key, base_url=base_url)
 
 
 def invoke_llm_text(llm: ChatOpenAI, prompt: str) -> str:
-    """Invoke the language model and return its string content."""
-    reply = llm.invoke(prompt)
+    """Invoke the language model and return its string content, raising if offline/unconfigured."""
+    if not has_active_api_key():
+        raise RuntimeError("No active OpenAI API key configured; using built-in static analysis engine.")
+    # Recreate client with fresh env vars in case user updated key in sidebar
+    active_llm = create_chat_model(
+        temperature=getattr(llm, "temperature", 0.1) or 0.1,
+        model_name=getattr(llm, "model_name", "gpt-4o-mini") or "gpt-4o-mini",
+    )
+    reply = active_llm.invoke(prompt)
     return reply.content if hasattr(reply, "content") else str(reply)
 
 

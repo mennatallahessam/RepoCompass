@@ -4,14 +4,19 @@ Launch with: streamlit run app.py
 """
 import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 from streamlit_mermaid import st_mermaid
 
 from src.github_client import GitHubClient
 from src.graph import run_analysis
-from src.utils import create_chat_model, invoke_llm_text
+from src.utils import (
+    create_chat_model,
+    has_active_api_key,
+    invoke_llm_text,
+    set_runtime_api_config,
+)
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -260,13 +265,6 @@ Base every answer strictly on this repository data, citing exact file paths, cla
 
 ## Indexed Source Code Samples
 {''.join(code_blocks)}
-
-## Answering Guidelines
-- Reference the file tree and core modules when explaining repository organization.
-- Quote or reference concrete implementations from the source code samples above.
-- Output a ```mermaid code block whenever asked for a diagram or architecture flow.
-- Reference the onboarding curriculum when asked how to learn or navigate the codebase.
-- Cite recent commits, pull requests, and manifest dependencies accurately.
 """
 
 
@@ -291,10 +289,175 @@ def render_message_with_mermaid(message: str) -> None:
         st.markdown(message[cursor:])
 
 
+def _synthesize_grounded_fallback_answer(analysis: Dict[str, Any], user_msg: str) -> str:
+    """
+    Generate a rich, repository-grounded response directly from the analyzed AST,
+    topology, and Mermaid artifacts when no external LLM API key is active.
+    """
+    q = user_msg.lower()
+    meta = analysis.get("metadata") or {}
+    nav = analysis.get("navigator_map") or {}
+    ctx = analysis.get("context_output") or {}
+    code_samples = analysis.get("code_samples") or {}
+    diagram = analysis.get("visualization") or ""
+
+    # 1. Check if the user is asking about a specific file in the repository
+    for file_path, content in code_samples.items():
+        basename = file_path.split("/")[-1].lower()
+        if basename in q or file_path.lower() in q:
+            funcs_in_file = [
+                f"`{fn['name']}({', '.join(fn.get('params', []))})` — {fn.get('purpose', '')}"
+                for fn in ctx.get("key_functions", [])
+                if fn.get("file") == file_path
+            ]
+            classes_in_file = [
+                f"`{c['name']}` — {c.get('purpose', '')} (methods: `{', '.join(c.get('methods', []))}`)"
+                for c in ctx.get("key_classes", [])
+                if c.get("file") == file_path
+            ]
+            preview = "\n".join(content.splitlines()[:35])
+            symbols_md = ""
+            if classes_in_file:
+                symbols_md += "\n**Classes in this file:**\n" + "\n".join(f"- {c}" for c in classes_in_file)
+            if funcs_in_file:
+                symbols_md += "\n**Functions in this file:**\n" + "\n".join(f"- {f}" for f in funcs_in_file)
+
+            return f"""### 📄 File Inspection: `{file_path}`
+{symbols_md}
+
+#### Source Excerpt:
+```python
+{preview}
+```"""
+
+    # 2. Architecture / Diagram / Data flow queries
+    if any(k in q for k in ("diagram", "mermaid", "visual", "architecture", "flow", "topology", "structure")):
+        mods_md = "\n".join(
+            f"- **`{m.get('path')}`**: {m.get('purpose')}"
+            for m in nav.get("core_modules_detailed", [])[:8]
+        )
+        ep_list = ", ".join(f"`{ep}`" for ep in nav.get("entry_points", [])) or "N/A"
+        return f"""### 🗺️ Component Architecture & Data Flow ({meta.get('full_name')})
+
+- **Architecture Pattern**: `{nav.get('architecture_type', 'unknown')}`
+- **Entry Points**: {ep_list}
+
+```mermaid
+{diagram}
+```
+
+#### Core Modules & Responsibilities
+{mods_md or '- Standard modular repository layout'}
+"""
+
+    # 3. Entry points / startup queries
+    if any(k in q for k in ("entry", "start", "launch", "boot", "run")):
+        eps = nav.get("entry_points", [])
+        ep_details = []
+        for ep in eps[:4]:
+            snippet = "\n".join((code_samples.get(ep) or "").splitlines()[:20])
+            ep_details.append(f"#### `{ep}`\n```python\n{snippet or '# Entry point file'}\n```")
+        return f"""### 🚪 Application Entry Points
+
+The primary bootstrap files for **{meta.get('full_name')}** are:
+{chr(10).join(f'- `{ep}`' for ep in eps) or '- No explicit entry point script detected'}
+
+{chr(10).join(ep_details)}"""
+
+    # 4. Onboarding / learning path queries
+    if any(k in q for k in ("onboard", "learn", "first", "roadmap", "guide", "mentor", "read")):
+        return f"""### 🧭 Recommended Developer Onboarding Roadmap
+
+```text
+{analysis.get('mentor_guide', 'N/A')}
+```
+
+**Tip**: Start with the entry points ({', '.join(f'`{e}`' for e in nav.get('entry_points', [])[:3])}) and then trace calls into the core modules ({', '.join(f'`{m}`' for m in nav.get('core_modules', [])[:4])})."""
+
+    # 5. Design patterns / stack / dependencies / technologies queries
+    if any(k in q for k in ("pattern", "stack", "tech", "dependenc", "librar", "framework")):
+        techs = ", ".join(f"`{t}`" for t in ctx.get("technologies", [])) or "Standard library"
+        patterns = "\n".join(f"- **{p}**" for p in ctx.get("patterns", [])) or "- Modular design"
+        deps = "\n".join(f"- `{d}`" for d in nav.get("dependencies", [])[:15]) or "- None listed in manifest"
+        return f"""### 🧩 Design Patterns & Technology Stack
+
+#### Detected Design Patterns
+{patterns}
+
+#### Frameworks & Libraries
+{techs}
+
+#### Manifest Dependencies
+{deps}"""
+
+    # 6. Functions / classes / API / models queries
+    if any(k in q for k in ("function", "class", "method", "api", "endpoint", "route", "model", "schema")):
+        fns = "\n".join(
+            f"- **`{f.get('name')}({', '.join(f.get('params', []))})`** (`{f.get('file')}`): {f.get('purpose')}"
+            for f in ctx.get("key_functions", [])[:8]
+        )
+        clss = "\n".join(
+            f"- **`{c.get('name')}`** (`{c.get('file')}`): {c.get('purpose')}"
+            for c in ctx.get("key_classes", [])[:8]
+        )
+        eps = "\n".join(
+            f"- **`{e.get('method')} {e.get('path')}`** (`{e.get('file')}`)"
+            for e in ctx.get("api_endpoints", [])[:8]
+        )
+        return f"""### 🔍 Key Code Symbols & Components
+
+#### Key Classes
+{clss or '- No classes detected'}
+
+#### Key Functions
+{fns or '- No standalone functions detected'}
+
+#### API Endpoints
+{eps or '- No HTTP routes detected'}"""
+
+    # 7. Commits / PRs queries
+    if any(k in q for k in ("commit", "pr", "pull request", "history", "recent", "author")):
+        commits = "\n".join(
+            f"- `{c.get('sha')}` **{c.get('message')}** _(by {c.get('author')}, {c.get('date')})_"
+            for c in analysis.get("recent_commits", [])[:8]
+        )
+        prs = "\n".join(
+            f"- **#{p.get('number')} {p.get('title')}** [`{p.get('state')}`] by `{p.get('author')}`"
+            for p in analysis.get("pull_requests", [])[:8]
+        )
+        return f"""### 📜 Repository Activity
+
+#### Recent Commits
+{commits or '- No recent commits available'}
+
+#### Pull Requests
+{prs or '- No pull requests available'}"""
+
+    # Default comprehensive overview
+    return f"""### 🧭 Repository Intelligence Summary: **{meta.get('full_name')}**
+
+{nav.get('project_summary', '')}
+
+- **Architecture**: `{nav.get('architecture_type', 'unknown')}`
+- **Entry Points**: {', '.join(f'`{e}`' for e in nav.get('entry_points', [])[:4])}
+- **Core Modules**: {', '.join(f'`{m}`' for m in nav.get('core_modules', [])[:6])}
+- **Key Technologies**: {', '.join(f'`{t}`' for t in ctx.get('technologies', [])[:8])}
+- **Key Classes**: {', '.join(f'`{c.get("name")}`' for c in ctx.get('key_classes', [])[:5]) or 'None'}
+- **Key Functions**: {', '.join(f'`{f.get("name")}()`' for f in ctx.get('key_functions', [])[:6]) or 'None'}
+
+You can ask me about any specific file (e.g. `{nav.get('entry_points', ['app.py'])[0]}`), request the **architecture diagram**, explore **design patterns**, or view the **onboarding roadmap**!"""
+
+
 def get_chat_response(
-    context: str, chat_history: List[Tuple[str, str]], user_msg: str
+    context: str,
+    chat_history: List[Tuple[str, str]],
+    user_msg: str,
+    analysis: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Query the conversational model with repository context and recent dialogue history."""
+    """
+    Query the conversational model with repository context and recent dialogue history,
+    gracefully falling back to the built-in grounded repository responder on API errors.
+    """
     dialogue_lines = [context, "\n\n## Dialogue History\n"]
     for speaker, text in chat_history[-6:]:
         label = "Developer" if speaker == "user" else "RepoCompass"
@@ -302,7 +465,12 @@ def get_chat_response(
     dialogue_lines.append(f"Developer: {user_msg}\n\nRepoCompass:")
 
     full_prompt = "".join(dialogue_lines)
-    return invoke_llm_text(chat_llm, full_prompt)
+    try:
+        return invoke_llm_text(chat_llm, full_prompt)
+    except Exception:
+        if analysis:
+            return _synthesize_grounded_fallback_answer(analysis, user_msg)
+        return "Please run repository analysis first so I can answer questions using verified repository data."
 
 
 def _format_initial_digest(analysis: Dict[str, Any]) -> str:
@@ -380,6 +548,22 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
+    with st.expander("🔑 Engine & API Configuration", expanded=False):
+        engine_status = "🟢 OpenAI LLM Active" if has_active_api_key() else "⚡ Built-in AST & Graph Engine Active"
+        st.caption(f"Current Mode: **{engine_status}**")
+        user_api_key = st.text_input(
+            "OpenAI API Key (Optional)",
+            type="password",
+            placeholder="sk-... (leave blank for built-in AST engine)",
+        )
+        user_base_url = st.text_input(
+            "Custom Base URL (Optional)",
+            placeholder="https://api.openai.com/v1",
+        )
+        if user_api_key:
+            set_runtime_api_config(user_api_key, user_base_url)
+            st.success("API key applied for live LLM calls.")
+
     with st.expander("🛠️ 5-Stage Pipeline Architecture", expanded=False):
         st.markdown(
             """
@@ -477,9 +661,9 @@ if not st.session_state.analysis:
             "or click a sample repository below to load its URL."
         )
         sample_repos = [
-            ("FastAPI Framework", "https://github.com/tiangolo/fastapi"),
+            ("RepoCompass (Self-Inspection)", "https://github.com/mennatallahessam/RepoCompass"),
             ("Flask Microframework", "https://github.com/pallets/flask"),
-            ("Pydantic Data Validation", "https://github.com/pydantic/pydantic"),
+            ("FastAPI Framework", "https://github.com/tiangolo/fastapi"),
         ]
         for label, url in sample_repos:
             if st.button(f"📂 {label} — {url.split('github.com/')[-1]}", use_container_width=True):
@@ -492,7 +676,7 @@ if not st.session_state.analysis:
             #### 💡 Studio Capabilities
             - **Interactive Codebase Chat**: Grounded Q&A referencing real files, commits, and PRs.
             - **Live Mermaid Diagrams**: Visual component graphs rendered directly in the browser.
-            - **Multi-Format Parsing**: Reads source code, configs, PDFs, Word docs, and image OCR.
+            - **Zero-Key Static AST Fallback**: Works out-of-the-box with built-in AST & Mermaid synthesis or with your own OpenAI API key.
             """
         )
 
@@ -590,6 +774,7 @@ else:
                         st.session_state.context,
                         st.session_state.chat_history,
                         active_query,
+                        analysis=analysis,
                     )
                 render_message_with_mermaid(ai_reply)
                 st.session_state.chat_history.append(("assistant", ai_reply))
