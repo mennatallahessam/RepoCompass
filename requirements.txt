@@ -1,14 +1,11 @@
 langgraph>=1.0.0
 langchain-openai>=0.3.0
-langchain-ollama>=1.0.0
 langchain-core>=1.2.0
 streamlit>=1.31.0
 streamlit-mermaid
 python-dotenv>=1.0.0
 requests>=2.31.0
 pydantic>=2.7.4
-markdown
-weasyprint
 pypdf
 python-docx
 Pillow
