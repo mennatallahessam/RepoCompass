@@ -2,6 +2,8 @@
 
 **Autonomous Multi-Agent GitHub Repository Architecture & Onboarding Studio**
 
+🚀 **Live Demo:** [repocompass-bgebefkbrnkxvppmzvdkqv.streamlit.app](https://repocompass-bgebefkbrnkxvppmzvdkqv.streamlit.app/)
+
 RepoCompass is a 5-stage LangGraph multi-agent system that inspects GitHub repositories to map directory topology, perform static code analysis, construct developer onboarding curriculums, synthesize interactive Mermaid architecture diagrams, and provide grounded conversational Q&A.
 
 ---
